@@ -2,6 +2,7 @@ package celery
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"sync"
 	"time"
@@ -21,6 +22,19 @@ type Client struct {
 	runningTasks sync.Map
 
 	queueName string
+}
+
+type celeryTask struct {
+	vu      modules.VU
+	metrics *celeryMetrics
+
+	taskId   string
+	taskName string
+
+	startedAt float64
+	sentAt    float64
+
+	waitGroup *sync.WaitGroup
 }
 
 type taskEvent struct {
@@ -100,10 +114,19 @@ func (client *Client) startEventsConsumer(brokerUrl string) error {
 }
 
 func (client *Client) receiveDelivery(msg *amqp091.Delivery) {
+
 	var eventsRaw []json.RawMessage
-	err := json.Unmarshal(msg.Body, &eventsRaw)
-	if err != nil {
-		return
+
+	switch msg.RoutingKey {
+	case "task.multi":
+		err := json.Unmarshal(msg.Body, &eventsRaw)
+		if err != nil {
+			return
+		}
+	case "task.sent":
+		eventsRaw = []json.RawMessage{msg.Body}
+	default:
+		panic(fmt.Errorf("unknown routing key %q", msg.RoutingKey))
 	}
 
 	for _, eventRaw := range eventsRaw {
@@ -115,15 +138,60 @@ func (client *Client) receiveDelivery(msg *amqp091.Delivery) {
 		}
 
 		switch event.Type {
+		case "task-sent":
+			client.handleSent(event, eventRaw)
 		case "task-started":
 			client.handleStarted(event)
 		case "task-succeeded":
 			client.handleFinished(event, true)
 		case "task-failed":
 			client.handleFinished(event, false)
-		case "task-sent":
-			client.handleSent(event, eventRaw)
+		case "task-retried":
+			client.handleRetried(event)
 		}
+	}
+}
+
+func (client *Client) handleSent(event taskEvent, eventRaw json.RawMessage) {
+	type taskSentData struct {
+		Name     string `json:"name"`
+		ParentId string `json:"parent_id"`
+	}
+
+	data := taskSentData{}
+	json.Unmarshal(eventRaw, &data)
+
+	entry, ok := client.runningTasks.Load(data.ParentId)
+	if ok {
+		parent := entry.(*celeryTask)
+
+		client.runningTasks.Store(event.TaskId, &celeryTask{
+			vu:      parent.vu,
+			metrics: parent.metrics,
+
+			taskId:   event.TaskId,
+			taskName: data.Name,
+
+			sentAt: event.Timestamp,
+
+			waitGroup: parent.waitGroup,
+		})
+
+		parent.waitGroup.Add(1)
+
+		ctx := parent.vu.Context()
+		state := parent.vu.State()
+		eventTime := floatToTime(event.Timestamp)
+		tags := map[string]string{
+			"task": data.Name,
+		}
+
+		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
+			Time:   eventTime,
+			Metric: parent.metrics.ChildTasks,
+			Tags:   metrics.IntoSampleTags(&tags),
+			Value:  1,
+		})
 	}
 }
 
@@ -134,7 +202,7 @@ func (client *Client) handleStarted(event taskEvent) {
 
 		ctx := task.vu.Context()
 		state := task.vu.State()
-		eventTime := toTime(event.Timestamp)
+		eventTime := floatToTime(event.Timestamp)
 		tags := map[string]string{
 			"task": task.taskName,
 		}
@@ -144,6 +212,14 @@ func (client *Client) handleStarted(event taskEvent) {
 			Metric: task.metrics.Tasks,
 			Tags:   metrics.IntoSampleTags(&tags),
 			Value:  1,
+		})
+
+		queueTimeNano := (event.Timestamp - task.sentAt) * 1000
+		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
+			Time:   eventTime,
+			Metric: task.metrics.TaskQueueTime,
+			Tags:   metrics.IntoSampleTags(&tags),
+			Value:  queueTimeNano,
 		})
 
 		task.startedAt = event.Timestamp
@@ -158,7 +234,7 @@ func (client *Client) handleFinished(event taskEvent, succeeded bool) {
 
 		ctx := task.vu.Context()
 		state := task.vu.State()
-		eventTime := toTime(event.Timestamp)
+		eventTime := floatToTime(event.Timestamp)
 		tags := map[string]string{
 			"task": task.taskName,
 		}
@@ -187,47 +263,25 @@ func (client *Client) handleFinished(event taskEvent, succeeded bool) {
 	}
 }
 
-func (client *Client) handleSent(event taskEvent, eventRaw json.RawMessage) {
-	type taskSentData struct {
-		Name     string `json:"name"`
-		ParentId string `json:"parent_id"`
-	}
-
-	data := taskSentData{}
-	json.Unmarshal(eventRaw, &data)
-
-	entry, ok := client.runningTasks.Load(data.ParentId)
+func (client *Client) handleRetried(event taskEvent) {
+	entry, ok := client.runningTasks.Load(event.TaskId)
 	if ok {
-		parent := entry.(*celeryTask)
+		task := entry.(*celeryTask)
 
-		client.runningTasks.Store(event.TaskId, &celeryTask{
-			vu:      parent.vu,
-			metrics: parent.metrics,
+		ctx := task.vu.Context()
+		state := task.vu.State()
+		eventTime := floatToTime(event.Timestamp)
+		tags := map[string]string{
+			"task": task.taskName,
+		}
 
-			taskId:    event.TaskId,
-			taskName:  data.Name,
-			waitGroup: parent.waitGroup,
+		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
+			Time:   eventTime,
+			Metric: task.metrics.TasksRetried,
+			Tags:   metrics.IntoSampleTags(&tags),
+			Value:  1,
 		})
-
-		parent.waitGroup.Add(1)
 	}
-}
-
-func toTime(t float64) time.Time {
-	sec, dec := math.Modf(t)
-	return time.Unix(int64(sec), int64(dec*(1e9)))
-}
-
-type celeryTask struct {
-	taskId   string
-	taskName string
-
-	vu      modules.VU
-	metrics *celeryMetrics
-
-	startedAt float64
-
-	waitGroup *sync.WaitGroup
 }
 
 func (client *Client) runTask(taskName string, args []interface{},
@@ -260,8 +314,11 @@ func (client *Client) runTask(taskName string, args []interface{},
 		vu:      vu,
 		metrics: metrics,
 
-		taskId:    taskId,
-		taskName:  taskName,
+		taskId:   taskId,
+		taskName: taskName,
+
+		sentAt: timeToFloat(time.Now()),
+
 		waitGroup: &waitGroup,
 	})
 
@@ -290,4 +347,13 @@ func getCeleryMessageBody(args []interface{}, kwargs map[string]interface{}) ([]
 		map[string]interface{}{"callbacks": nil, "errbacks": nil, "chain": nil, "chord": nil},
 	}
 	return json.Marshal(body)
+}
+
+func floatToTime(t float64) time.Time {
+	sec, dec := math.Modf(t)
+	return time.Unix(int64(sec), int64(dec*(1e9)))
+}
+
+func timeToFloat(t time.Time) float64 {
+	return float64(t.Unix()) + float64(t.Nanosecond())/1e9
 }
