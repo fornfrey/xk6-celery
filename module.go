@@ -1,9 +1,11 @@
 package celery
 
 import (
+	"errors"
 	"sync"
 
 	"github.com/dop251/goja"
+	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 )
 
@@ -12,7 +14,6 @@ type (
 		client *Client
 	}
 
-	// ModuleInstance represents an instance of the GRPC module for every VU.
 	ModuleInstance struct {
 		*RootModule
 		vu      modules.VU
@@ -32,7 +33,7 @@ func (root *RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 		exports:    make(map[string]interface{}),
 	}
 
-	mi.exports["Client"] = mi.NewCeleryClient
+	mi.exports["connect"] = mi.connect
 	return mi
 }
 
@@ -42,25 +43,60 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 	}
 }
 
-var initClientOnce = sync.Once{}
-
-func (mi *ModuleInstance) NewCeleryClient(call goja.ConstructorCall) *goja.Object {
-	rt := mi.vu.Runtime()
-
-	initClientOnce.Do(func() {
-		brokerUrl := call.Arguments[0].String()
-		newClient, err := NewClient(brokerUrl)
-		if err != nil {
-			panic(err)
-		}
-
-		mi.RootModule.client = newClient
-	})
-
-	return rt.ToValue(mi.RootModule.client).ToObject(rt)
-}
-
 func init() {
 	root := &RootModule{}
 	modules.Register("k6/x/celery", root)
+}
+
+var initClientOnce = sync.Once{}
+
+func (moduleInstance *ModuleInstance) connect(brokerUrl string, queueName string) *goja.Object {
+	vu := moduleInstance.vu
+
+	rt := vu.Runtime()
+	state := vu.State()
+	if state != nil {
+		common.Throw(rt, errors.New("celery client should be instantiated in init context"))
+	}
+
+	initClientOnce.Do(func() {
+		newClient, err := newClient(brokerUrl, queueName)
+		if err != nil {
+			common.Throw(rt, err)
+		}
+
+		moduleInstance.client = newClient
+	})
+
+	metrics, err := registerMetrics(vu)
+	if err != nil {
+		common.Throw(rt, err)
+	}
+
+	return rt.ToValue(&vuClientWrapper{
+		vu:      vu,
+		metrics: metrics,
+		client:  moduleInstance.client,
+	}).ToObject(rt)
+}
+
+type vuClientWrapper struct {
+	client *Client
+
+	vu      modules.VU
+	metrics *celeryMetrics
+}
+
+func (wrapper *vuClientWrapper) RunTask(taskName string, args []interface{}) {
+	vu := wrapper.vu
+	rt := vu.Runtime()
+	state := vu.State()
+	if state == nil {
+		common.Throw(rt, errors.New("celery task can't be run in init context"))
+	}
+
+	err := wrapper.client.runTask(taskName, args, vu, wrapper.metrics)
+	if err != nil {
+		common.Throw(rt, err)
+	}
 }

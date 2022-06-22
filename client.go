@@ -2,31 +2,45 @@ package celery
 
 import (
 	"encoding/json"
+	"math"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/rabbitmq/amqp091-go"
+	"go.k6.io/k6/js/modules"
+	"go.k6.io/k6/metrics"
 )
 
 type Client struct {
-	brokerUrl string
+	consumeConnection *amqp091.Connection
+	publishConnection *amqp091.Connection
 
 	publishChannel *amqp091.Channel
 
 	runningTasks sync.Map
+
+	queueName string
 }
 
-func NewClient(brokerUrl string) (*Client, error) {
+type taskEvent struct {
+	Type      string  `json:"type"`
+	TaskId    string  `json:"uuid"`
+	Timestamp float64 `json:"timestamp"`
+}
+
+func newClient(brokerUrl string, queueName string) (*Client, error) {
 
 	client := &Client{
-		brokerUrl: brokerUrl,
+		queueName: queueName,
 	}
 
-	publishConnection, err := client.dial()
+	publishConnection, err := client.dial(brokerUrl)
 	if err != nil {
 		return nil, err
 	}
+
+	client.publishConnection = publishConnection
 
 	publishChannel, err := publishConnection.Channel()
 	if err != nil {
@@ -43,18 +57,20 @@ func NewClient(brokerUrl string) (*Client, error) {
 	return client, nil
 }
 
-func (celery *Client) dial() (*amqp091.Connection, error) {
-	connection, err := amqp091.Dial(celery.brokerUrl)
+func (client *Client) dial(brokerUrl string) (*amqp091.Connection, error) {
+	connection, err := amqp091.Dial(brokerUrl)
 	return connection, err
 }
 
 func (client *Client) startEventsConsumer(brokerUrl string) error {
-	consumerConnection, err := client.dial()
+	consumeConnection, err := client.dial(brokerUrl)
 	if err != nil {
 		return err
 	}
 
-	consumerChannel, err := consumerConnection.Channel()
+	client.consumeConnection = consumeConnection
+
+	consumerChannel, err := consumeConnection.Channel()
 	if err != nil {
 		return err
 	}
@@ -92,66 +108,137 @@ func (client *Client) receiveDelivery(msg *amqp091.Delivery) {
 
 	for _, eventRaw := range eventsRaw {
 
-		type eventType struct {
-			Value string `json:"type"`
-		}
-
-		et := eventType{}
-		err := json.Unmarshal(eventRaw, &et)
+		event := taskEvent{}
+		err := json.Unmarshal(eventRaw, &event)
 		if err != nil {
 			continue
 		}
 
-		switch et.Value {
+		switch event.Type {
+		case "task-started":
+			client.handleStarted(event)
 		case "task-succeeded":
-			client.handleTaskSucceeded(eventRaw)
+			client.handleFinished(event, true)
 		case "task-failed":
-			client.handleTaskFailed(eventRaw)
-		default:
-			continue
+			client.handleFinished(event, false)
+		case "task-sent":
+			client.handleSent(event, eventRaw)
 		}
 	}
 }
 
-func (client *Client) handleTaskSucceeded(eventRaw json.RawMessage) {
-	event := taskSucceeded{}
-	if err := json.Unmarshal(eventRaw, &event); err != nil {
-		panic(err)
+func (client *Client) handleStarted(event taskEvent) {
+	entry, ok := client.runningTasks.Load(event.TaskId)
+	if ok {
+		task := entry.(*celeryTask)
+
+		ctx := task.vu.Context()
+		state := task.vu.State()
+		eventTime := toTime(event.Timestamp)
+		tags := map[string]string{
+			"task": task.taskName,
+		}
+
+		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
+			Time:   eventTime,
+			Metric: task.metrics.Tasks,
+			Tags:   metrics.IntoSampleTags(&tags),
+			Value:  1,
+		})
+
+		task.startedAt = event.Timestamp
 	}
-	client.completeTask(event.TaskId)
 }
 
-func (client *Client) handleTaskFailed(eventRaw json.RawMessage) {
-	event := taskFailed{}
-	if err := json.Unmarshal(eventRaw, &event); err != nil {
-		panic(err)
-	}
-	client.completeTask(event.TaskId)
-}
-
-func (client *Client) completeTask(taskId string) bool {
-	entry, ok := client.runningTasks.LoadAndDelete(taskId)
+func (client *Client) handleFinished(event taskEvent, succeeded bool) {
+	entry, ok := client.runningTasks.LoadAndDelete(event.TaskId)
 
 	if ok {
-		callback := entry.(func())
-		callback()
+		task := entry.(*celeryTask)
+
+		ctx := task.vu.Context()
+		state := task.vu.State()
+		eventTime := toTime(event.Timestamp)
+		tags := map[string]string{
+			"task": task.taskName,
+		}
+
+		taskSucceededVal := 0.
+		if succeeded {
+			taskSucceededVal = 1
+		}
+
+		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
+			Time:   eventTime,
+			Metric: task.metrics.TasksSucceeded,
+			Tags:   metrics.IntoSampleTags(&tags),
+			Value:  taskSucceededVal,
+		})
+
+		runtimeNanoSec := (event.Timestamp - task.startedAt) * 1000
+		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
+			Time:   eventTime,
+			Metric: task.metrics.TaskRuntime,
+			Tags:   metrics.IntoSampleTags(&tags),
+			Value:  runtimeNanoSec,
+		})
+
+		task.waitGroup.Done()
+	}
+}
+
+func (client *Client) handleSent(event taskEvent, eventRaw json.RawMessage) {
+	type taskSentData struct {
+		Name     string `json:"name"`
+		ParentId string `json:"parent_id"`
 	}
 
-	return ok
+	data := taskSentData{}
+	json.Unmarshal(eventRaw, &data)
+
+	entry, ok := client.runningTasks.Load(data.ParentId)
+	if ok {
+		parent := entry.(*celeryTask)
+
+		client.runningTasks.Store(event.TaskId, &celeryTask{
+			vu:      parent.vu,
+			metrics: parent.metrics,
+
+			taskId:    event.TaskId,
+			taskName:  data.Name,
+			waitGroup: parent.waitGroup,
+		})
+
+		parent.waitGroup.Add(1)
+	}
 }
 
-func (client *Client) notifyWhenCompleted(taskId string, callback func()) {
-	client.runningTasks.Store(taskId, callback)
+func toTime(t float64) time.Time {
+	sec, dec := math.Modf(t)
+	return time.Unix(int64(sec), int64(dec*(1e9)))
 }
 
-func (client *Client) CallTask(task string, args []interface{}) error {
+type celeryTask struct {
+	taskId   string
+	taskName string
 
-	taskId := uuid.New().String()
+	vu      modules.VU
+	metrics *celeryMetrics
+
+	startedAt float64
+
+	waitGroup *sync.WaitGroup
+}
+
+func (client *Client) runTask(taskName string, args []interface{},
+	vu modules.VU, metrics *celeryMetrics) error {
+
 	celeryMessageBody, err := getCeleryMessageBody(args, make(map[string]interface{}))
 	if err != nil {
 		return err
 	}
 
+	taskId := uuid.New().String()
 	publishing := amqp091.Publishing{
 		CorrelationId:   uuid.New().String(),
 		Priority:        0,
@@ -162,33 +249,36 @@ func (client *Client) CallTask(task string, args []interface{}) error {
 			"id":            taskId,
 			"ignore_result": true,
 			"root_id":       taskId,
-			"task":          task,
+			"task":          taskName,
 		},
 		Body: celeryMessageBody,
 	}
 
+	waitGroup := sync.WaitGroup{}
+	waitGroup.Add(1)
+	client.runningTasks.Store(taskId, &celeryTask{
+		vu:      vu,
+		metrics: metrics,
+
+		taskId:    taskId,
+		taskName:  taskName,
+		waitGroup: &waitGroup,
+	})
+
 	err = client.publishChannel.Publish(
 		"",
-		"k6-api-events",
+		client.queueName,
 		false,
 		false,
 		publishing,
 	)
 
 	if err != nil {
+		client.runningTasks.Delete(taskId)
 		return err
 	}
 
-	completed := make(chan interface{})
-	client.notifyWhenCompleted(taskId, func() {
-		completed <- nil
-	})
-
-	select {
-	case <-completed:
-	case <-time.After(time.Second * 60):
-		client.runningTasks.Delete(taskId)
-	}
+	waitGroup.Wait()
 
 	return nil
 }
