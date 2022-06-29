@@ -281,6 +281,16 @@ func (client *Client) handleRetried(event taskEvent) {
 			Tags:   metrics.IntoSampleTags(&tags),
 			Value:  1,
 		})
+
+		runtimeNanoSec := (event.Timestamp - task.startedAt) * 1000
+		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
+			Time:   eventTime,
+			Metric: task.metrics.TaskRuntime,
+			Tags:   metrics.IntoSampleTags(&tags),
+			Value:  runtimeNanoSec,
+		})
+
+		task.sentAt = event.Timestamp
 	}
 }
 
