@@ -35,7 +35,7 @@ func registerMetrics(vu modules.VU) (*celeryMetrics, error) {
 		return nil, err
 	}
 
-	m.TasksRetried, err = registry.NewMetric("celery_tasks_retried", metrics.Rate)
+	m.TasksRetried, err = registry.NewMetric("celery_tasks_retried", metrics.Counter)
 	if err != nil {
 		return nil, err
 	}
