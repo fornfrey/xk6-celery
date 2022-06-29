@@ -1,4 +1,4 @@
-module xk6-celery
+module github.com/fornfrey/xk6-celery
 
 go 1.18
 
