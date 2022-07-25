@@ -2,6 +2,7 @@ package celery
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -294,10 +295,42 @@ func (client *Client) handleRetried(event taskEvent) {
 	}
 }
 
-func (client *Client) runTask(taskName string, args []interface{},
-	vu modules.VU, metrics *celeryMetrics) error {
+type TaskRunArgs struct {
+	TaskName   string
+	Args       []any
+	Kwargs     map[string]any
+	Serializer string
+}
 
-	celeryMessageBody, err := getCeleryMessageBody(args, make(map[string]interface{}))
+func (client *Client) RunTask(
+	params *TaskRunArgs,
+	vu modules.VU,
+	metrics *celeryMetrics) error {
+
+	if params.TaskName == "" {
+		return errors.New("taskName is required")
+	}
+
+	serializerType := "json"
+	if params.Serializer != "" {
+		serializerType = params.Serializer
+	}
+
+	codec, ok := codecs[serializerType]
+	if !ok {
+		return fmt.Errorf("unknown serializer %s", serializerType)
+	}
+
+	if params.Args == nil {
+		params.Args = make([]any, 0)
+	}
+
+	if params.Kwargs == nil {
+		params.Kwargs = make(map[string]any)
+	}
+
+	body := []any{params.Args, params.Kwargs, getCeleryOptions()}
+	serializedBody, err := codec.Serializer(body)
 	if err != nil {
 		return err
 	}
@@ -307,15 +340,15 @@ func (client *Client) runTask(taskName string, args []interface{},
 		CorrelationId:   uuid.New().String(),
 		Priority:        0,
 		DeliveryMode:    amqp091.Persistent,
-		ContentEncoding: "utf-8",
-		ContentType:     "application/json",
+		ContentEncoding: codec.Encoding,
+		ContentType:     codec.ContentType,
 		Headers: amqp091.Table{
 			"id":            taskId,
 			"ignore_result": true,
 			"root_id":       taskId,
-			"task":          taskName,
+			"task":          params.TaskName,
 		},
-		Body: celeryMessageBody,
+		Body: serializedBody,
 	}
 
 	waitGroup := sync.WaitGroup{}
@@ -325,7 +358,7 @@ func (client *Client) runTask(taskName string, args []interface{},
 		metrics: metrics,
 
 		taskId:   taskId,
-		taskName: taskName,
+		taskName: params.TaskName,
 
 		sentAt: timeToFloat(time.Now()),
 
@@ -350,13 +383,8 @@ func (client *Client) runTask(taskName string, args []interface{},
 	return nil
 }
 
-func getCeleryMessageBody(args []interface{}, kwargs map[string]interface{}) ([]byte, error) {
-	body := []interface{}{
-		args,
-		kwargs,
-		map[string]interface{}{"callbacks": nil, "errbacks": nil, "chain": nil, "chord": nil},
-	}
-	return json.Marshal(body)
+func getCeleryOptions() map[string]any {
+	return map[string]any{"callbacks": nil, "errbacks": nil, "chain": nil, "chord": nil}
 }
 
 func floatToTime(t float64) time.Time {

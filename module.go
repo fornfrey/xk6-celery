@@ -33,7 +33,7 @@ func (root *RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 		exports:    make(map[string]interface{}),
 	}
 
-	mi.exports["connect"] = mi.connect
+	mi.exports["connect"] = mi.Connect
 	return mi
 }
 
@@ -50,7 +50,7 @@ func init() {
 
 var initClientOnce = sync.Once{}
 
-func (moduleInstance *ModuleInstance) connect(brokerUrl string, queueName string) *goja.Object {
+func (moduleInstance *ModuleInstance) Connect(brokerUrl string, queueName string) *goja.Object {
 	vu := moduleInstance.vu
 
 	rt := vu.Runtime()
@@ -87,7 +87,7 @@ type vuClientWrapper struct {
 	metrics *celeryMetrics
 }
 
-func (wrapper *vuClientWrapper) RunTask(taskName string, args []interface{}) {
+func (wrapper *vuClientWrapper) RunTask(params *TaskRunArgs) {
 	vu := wrapper.vu
 	rt := vu.Runtime()
 	state := vu.State()
@@ -95,7 +95,7 @@ func (wrapper *vuClientWrapper) RunTask(taskName string, args []interface{}) {
 		common.Throw(rt, errors.New("celery task can't be run in init context"))
 	}
 
-	err := wrapper.client.runTask(taskName, args, vu, wrapper.metrics)
+	err := wrapper.client.RunTask(params, vu, wrapper.metrics)
 	if err != nil {
 		common.Throw(rt, err)
 	}
