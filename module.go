@@ -87,7 +87,7 @@ type vuClientWrapper struct {
 	metrics *celeryMetrics
 }
 
-func (wrapper *vuClientWrapper) RunTask(params *TaskRunArgs) {
+func (wrapper *vuClientWrapper) RunTask(sig *TaskSignature) {
 	vu := wrapper.vu
 	rt := vu.Runtime()
 	state := vu.State()
@@ -95,7 +95,7 @@ func (wrapper *vuClientWrapper) RunTask(params *TaskRunArgs) {
 		common.Throw(rt, errors.New("celery task can't be run in init context"))
 	}
 
-	err := wrapper.client.RunTask(params, vu, wrapper.metrics)
+	err := wrapper.client.RunTask(sig, vu, wrapper.metrics)
 	if err != nil {
 		common.Throw(rt, err)
 	}

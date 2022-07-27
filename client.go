@@ -301,70 +301,24 @@ func (client *Client) handleRetried(event taskEvent) {
 	}
 }
 
-type TaskRunArgs struct {
-	TaskName   string
-	Args       []any
-	Kwargs     map[string]any
-	Serializer string
-}
+func (client *Client) RunTask(sig *TaskSignature, vu modules.VU, metrics *celeryMetrics) error {
 
-func (client *Client) RunTask(
-	params *TaskRunArgs,
-	vu modules.VU,
-	metrics *celeryMetrics) error {
+	taskId := uuid.New().String()
 
-	if params.TaskName == "" {
-		return errors.New("taskName is required")
-	}
-
-	serializerType := "json"
-	if params.Serializer != "" {
-		serializerType = params.Serializer
-	}
-
-	codec, ok := codecs[serializerType]
-	if !ok {
-		return fmt.Errorf("unknown serializer %s", serializerType)
-	}
-
-	if params.Args == nil {
-		params.Args = make([]any, 0)
-	}
-
-	if params.Kwargs == nil {
-		params.Kwargs = make(map[string]any)
-	}
-
-	body := []any{params.Args, params.Kwargs, getCeleryOptions()}
-	serializedBody, err := codec.Serializer(body)
+	publishing, err := sig.Publishing(taskId)
 	if err != nil {
 		return err
 	}
 
-	taskId := uuid.New().String()
-	publishing := amqp091.Publishing{
-		CorrelationId:   uuid.New().String(),
-		Priority:        0,
-		DeliveryMode:    amqp091.Persistent,
-		ContentEncoding: codec.Encoding,
-		ContentType:     codec.ContentType,
-		Headers: amqp091.Table{
-			"id":            taskId,
-			"ignore_result": true,
-			"root_id":       taskId,
-			"task":          params.TaskName,
-		},
-		Body: serializedBody,
-	}
-
 	waitGroup := sync.WaitGroup{}
 	waitGroup.Add(1)
+
 	client.runningTasks.Store(taskId, &celeryTask{
 		vu:      vu,
 		metrics: metrics,
 
 		taskId:   taskId,
-		taskName: params.TaskName,
+		taskName: sig.Name,
 
 		sentAt: timeToFloat(time.Now()),
 
@@ -372,7 +326,7 @@ func (client *Client) RunTask(
 	})
 
 	err = client.publishChannel.Publish(
-		"",
+		"", // publish to the default exchange and directly to the queue
 		client.queueName,
 		false,
 		false,
@@ -400,4 +354,67 @@ func floatToTime(t float64) time.Time {
 
 func timeToFloat(t time.Time) float64 {
 	return float64(t.Unix()) + float64(t.Nanosecond())/1e9
+}
+
+type TaskSignature struct {
+	Name       string
+	Args       []any
+	Kwargs     map[string]any
+	Serializer string
+}
+
+func (sig *TaskSignature) Publishing(taskId string) (amqp091.Publishing, error) {
+	if sig.Name == "" {
+		return amqp091.Publishing{}, errors.New("'name' is required")
+	}
+
+	codec, err := sig.codec()
+	if err != nil {
+		return amqp091.Publishing{}, err
+	}
+
+	args := sig.Args
+	if sig.Args == nil {
+		args = make([]any, 0)
+	}
+
+	kwargs := sig.Kwargs
+	if sig.Kwargs == nil {
+		kwargs = make(map[string]any)
+	}
+
+	body := []any{args, kwargs, getCeleryOptions()}
+	serializedBody, err := codec.Serializer(body)
+	if err != nil {
+		return amqp091.Publishing{}, err
+	}
+
+	publishing := amqp091.Publishing{
+		CorrelationId:   uuid.New().String(),
+		Priority:        0,
+		DeliveryMode:    amqp091.Persistent,
+		ContentEncoding: codec.Encoding,
+		ContentType:     codec.ContentType,
+		Headers: amqp091.Table{
+			"id":            taskId,
+			"ignore_result": true,
+			"root_id":       taskId,
+			"task":          sig.Name,
+		},
+		Body: serializedBody,
+	}
+	return publishing, nil
+}
+
+func (args *TaskSignature) codec() (*codec, error) {
+	serializerType := "json" // json serializer is the default one
+	if args.Serializer != "" {
+		serializerType = args.Serializer
+	}
+
+	codec, ok := codecs[serializerType]
+	if !ok {
+		return nil, fmt.Errorf("unknown serializer %s", serializerType)
+	}
+	return codec, nil
 }
