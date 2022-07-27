@@ -216,17 +216,16 @@ func (client *Client) handleStarted(event taskEvent) {
 
 		ctx := task.vu.Context()
 		state := task.vu.State()
-		eventTime := floatToTime(event.Timestamp)
-		tags := metrics.IntoSampleTags(&map[string]string{
-			"task": task.taskName,
-		})
 
+		eventTime := floatToTime(event.Timestamp)
 		queueTimeNano := (event.Timestamp - task.sentAt) * 1000
 		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
 			Time:   eventTime,
 			Metric: task.metrics.TaskQueueTime,
-			Tags:   tags,
-			Value:  queueTimeNano,
+			Tags: metrics.IntoSampleTags(&map[string]string{
+				"task": task.taskName,
+			}),
+			Value: queueTimeNano,
 		})
 
 		task.startedAt = event.Timestamp
@@ -242,28 +241,32 @@ func (client *Client) handleFinished(event taskEvent, succeeded bool) {
 		ctx := task.vu.Context()
 		state := task.vu.State()
 		eventTime := floatToTime(event.Timestamp)
-		tags := metrics.IntoSampleTags(&map[string]string{
-			"task": task.taskName,
-		})
 
+		taskState := "failure"
 		taskSucceededVal := 0.
 		if succeeded {
 			taskSucceededVal = 1
+			taskState = "success"
 		}
 
 		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
 			Time:   eventTime,
 			Metric: task.metrics.TasksSucceeded,
-			Tags:   tags,
-			Value:  taskSucceededVal,
+			Tags: metrics.IntoSampleTags(&map[string]string{
+				"task": task.taskName,
+			}),
+			Value: taskSucceededVal,
 		})
 
 		runtimeNanoSec := (event.Timestamp - task.startedAt) * 1000
 		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
 			Time:   eventTime,
 			Metric: task.metrics.TaskRuntime,
-			Tags:   tags,
-			Value:  runtimeNanoSec,
+			Tags: metrics.IntoSampleTags(&map[string]string{
+				"task":  task.taskName,
+				"state": taskState,
+			}),
+			Value: runtimeNanoSec,
 		})
 
 		task.waitGroup.Done()
@@ -278,23 +281,25 @@ func (client *Client) handleRetried(event taskEvent) {
 		ctx := task.vu.Context()
 		state := task.vu.State()
 		eventTime := floatToTime(event.Timestamp)
-		tags := metrics.IntoSampleTags(&map[string]string{
-			"task": task.taskName,
-		})
 
 		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
 			Time:   eventTime,
 			Metric: task.metrics.TasksRetried,
-			Tags:   tags,
-			Value:  1,
+			Tags: metrics.IntoSampleTags(&map[string]string{
+				"task": task.taskName,
+			}),
+			Value: 1,
 		})
 
 		runtimeNanoSec := (event.Timestamp - task.startedAt) * 1000
 		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
 			Time:   eventTime,
 			Metric: task.metrics.TaskRuntime,
-			Tags:   tags,
-			Value:  runtimeNanoSec,
+			Tags: metrics.IntoSampleTags(&map[string]string{
+				"task":  task.taskName,
+				"state": "retry",
+			}),
+			Value: runtimeNanoSec,
 		})
 
 		task.sentAt = event.Timestamp
