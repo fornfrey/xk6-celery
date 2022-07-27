@@ -90,6 +90,12 @@ func (client *Client) startEventsConsumer(brokerUrl string) error {
 		return err
 	}
 
+	eventsExchange := "celeryev"
+	err = consumerChannel.ExchangeDeclare(eventsExchange, "topic", true, false, false, false, nil)
+	if err != nil {
+		return err
+	}
+
 	queue, err := consumerChannel.QueueDeclare("k6-task-events", false, true, false, false, nil)
 	if err != nil {
 		return err
