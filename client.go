@@ -189,14 +189,21 @@ func (client *Client) handleSent(event taskEvent, eventRaw json.RawMessage) {
 		ctx := parent.vu.Context()
 		state := parent.vu.State()
 		eventTime := floatToTime(event.Timestamp)
-		tags := map[string]string{
+		tags := metrics.IntoSampleTags(&map[string]string{
 			"task": data.Name,
-		}
+		})
+
+		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
+			Time:   eventTime,
+			Metric: parent.metrics.TasksTotal,
+			Tags:   tags,
+			Value:  1,
+		})
 
 		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
 			Time:   eventTime,
 			Metric: parent.metrics.ChildTasks,
-			Tags:   metrics.IntoSampleTags(&tags),
+			Tags:   tags,
 			Value:  1,
 		})
 	}
@@ -212,13 +219,6 @@ func (client *Client) handleStarted(event taskEvent) {
 		eventTime := floatToTime(event.Timestamp)
 		tags := metrics.IntoSampleTags(&map[string]string{
 			"task": task.taskName,
-		})
-
-		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
-			Time:   eventTime,
-			Metric: task.metrics.Tasks,
-			Tags:   tags,
-			Value:  1,
 		})
 
 		queueTimeNano := (event.Timestamp - task.sentAt) * 1000
@@ -301,7 +301,7 @@ func (client *Client) handleRetried(event taskEvent) {
 	}
 }
 
-func (client *Client) RunTask(sig *TaskSignature, vu modules.VU, metrics *celeryMetrics) error {
+func (client *Client) RunTask(sig *TaskSignature, vu modules.VU, vuMetrics *celeryMetrics) error {
 
 	taskId := uuid.New().String()
 
@@ -313,14 +313,15 @@ func (client *Client) RunTask(sig *TaskSignature, vu modules.VU, metrics *celery
 	waitGroup := sync.WaitGroup{}
 	waitGroup.Add(1)
 
+	now := time.Now()
 	client.runningTasks.Store(taskId, &celeryTask{
 		vu:      vu,
-		metrics: metrics,
+		metrics: vuMetrics,
 
 		taskId:   taskId,
 		taskName: sig.Name,
 
-		sentAt: timeToFloat(time.Now()),
+		sentAt: timeToFloat(now),
 
 		waitGroup: &waitGroup,
 	})
@@ -337,6 +338,24 @@ func (client *Client) RunTask(sig *TaskSignature, vu modules.VU, metrics *celery
 		client.runningTasks.Delete(taskId)
 		return err
 	}
+
+	tags := metrics.IntoSampleTags(&map[string]string{
+		"task": sig.Name,
+	})
+
+	metrics.PushIfNotDone(vu.Context(), vu.State().Samples, metrics.Sample{
+		Time:   now,
+		Metric: vuMetrics.Tasks,
+		Tags:   tags,
+		Value:  1,
+	})
+
+	metrics.PushIfNotDone(vu.Context(), vu.State().Samples, metrics.Sample{
+		Time:   now,
+		Metric: vuMetrics.TasksTotal,
+		Tags:   tags,
+		Value:  1,
+	})
 
 	waitGroup.Wait()
 

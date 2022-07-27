@@ -8,6 +8,7 @@ import (
 type celeryMetrics struct {
 	Tasks          *metrics.Metric
 	ChildTasks     *metrics.Metric
+	TasksTotal     *metrics.Metric
 	TasksSucceeded *metrics.Metric
 	TasksRetried   *metrics.Metric
 
@@ -15,40 +16,17 @@ type celeryMetrics struct {
 	TaskQueueTime *metrics.Metric
 }
 
-func registerMetrics(vu modules.VU) (*celeryMetrics, error) {
-	var err error
+func registerMetrics(vu modules.VU) *celeryMetrics {
 	registry := vu.InitEnv().Registry
-	m := celeryMetrics{}
+	m := new(celeryMetrics)
 
-	m.Tasks, err = registry.NewMetric("celery_tasks", metrics.Counter)
-	if err != nil {
-		return nil, err
-	}
+	m.Tasks = registry.MustNewMetric("celery_tasks", metrics.Counter)
+	m.ChildTasks = registry.MustNewMetric("celery_tasks_child", metrics.Counter)
+	m.TasksTotal = registry.MustNewMetric("celery_tasks_total", metrics.Counter)
+	m.TasksSucceeded = registry.MustNewMetric("celery_tasks_succeeded", metrics.Rate)
+	m.TasksRetried = registry.MustNewMetric("celery_tasks_retried", metrics.Counter)
+	m.TaskRuntime = registry.MustNewMetric("celery_task_runtime", metrics.Trend, metrics.Time)
+	m.TaskQueueTime = registry.MustNewMetric("celery_task_queue_time", metrics.Trend, metrics.Time)
 
-	m.ChildTasks, err = registry.NewMetric("celery_tasks_child", metrics.Counter)
-	if err != nil {
-		return nil, err
-	}
-
-	m.TasksSucceeded, err = registry.NewMetric("celery_tasks_succeeded", metrics.Rate)
-	if err != nil {
-		return nil, err
-	}
-
-	m.TasksRetried, err = registry.NewMetric("celery_tasks_retried", metrics.Counter)
-	if err != nil {
-		return nil, err
-	}
-
-	m.TaskRuntime, err = registry.NewMetric("celery_task_runtime", metrics.Trend, metrics.Time)
-	if err != nil {
-		return nil, err
-	}
-
-	m.TaskQueueTime, err = registry.NewMetric("celery_task_queue_time", metrics.Trend, metrics.Time)
-	if err != nil {
-		return nil, err
-	}
-
-	return &m, nil
+	return m
 }

@@ -68,10 +68,7 @@ func (moduleInstance *ModuleInstance) Connect(brokerUrl string, queueName string
 		moduleInstance.client = newClient
 	})
 
-	metrics, err := registerMetrics(vu)
-	if err != nil {
-		common.Throw(rt, err)
-	}
+	metrics := registerMetrics(vu)
 
 	return rt.ToValue(&vuClientWrapper{
 		vu:      vu,
