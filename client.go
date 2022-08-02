@@ -23,6 +23,8 @@ type Client struct {
 	runningTasks sync.Map
 
 	queueName string
+
+	connectionClosed chan struct{}
 }
 
 type celeryTask struct {
@@ -47,7 +49,8 @@ type taskEvent struct {
 func newClient(brokerUrl string, queueName string) (*Client, error) {
 
 	client := &Client{
-		queueName: queueName,
+		queueName:        queueName,
+		connectionClosed: make(chan struct{}),
 	}
 
 	publishConnection, err := client.dial(brokerUrl)
@@ -362,9 +365,18 @@ func (client *Client) RunTask(sig *TaskSignature, vu modules.VU, vuMetrics *cele
 		Value:  1,
 	})
 
-	waitGroup.Wait()
+	taskDone := make(chan struct{})
+	go func() {
+		waitGroup.Wait()
+		close(taskDone)
+	}()
 
-	return nil
+	select {
+	case <-taskDone:
+		return nil
+	case <-client.connectionClosed:
+		return errors.New("connection closed before task completed")
+	}
 }
 
 func getCeleryOptions() map[string]any {
@@ -378,6 +390,12 @@ func floatToTime(t float64) time.Time {
 
 func timeToFloat(t time.Time) float64 {
 	return float64(t.Unix()) + float64(t.Nanosecond())/1e9
+}
+
+func (client *Client) Close() {
+	client.publishConnection.Close()
+	client.consumeConnection.Close()
+	close(client.connectionClosed)
 }
 
 type TaskSignature struct {

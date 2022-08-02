@@ -97,3 +97,7 @@ func (wrapper *vuClientWrapper) RunTask(sig *TaskSignature) {
 		common.Throw(rt, err)
 	}
 }
+
+func (wrapper *vuClientWrapper) Close() {
+	wrapper.client.Close()
+}
