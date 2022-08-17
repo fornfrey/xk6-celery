@@ -67,16 +67,25 @@ import celery from 'k6/x/celery';
 
 const client = celery.connect("amqp://localhost:5672", "celery");
 
+export function teardown() {
+  client.close()
+}
+
 export default function () {
-    client.runTask("tasks.add", [2, 3])  // blocks until task is done
-    client.runTask("tasks.parent", [])   // blocks until all child tasks are done
+    client.runTask({
+        name: "tasks.add",
+        args: [2, 3]
+})  // blocks until task is done
+    client.runTask({
+        name: "tasks.parent",
+        args: []
+    })   // blocks until all child tasks are done
 }
 ```
 
 Result output:
 
 ```
-$ ./k6 run script.js
 
           /\      |‾‾| /‾‾/   /‾‾/   
      /\  /  \     |  |/  /   /  /    
@@ -95,13 +104,17 @@ $ ./k6 run script.js
 running (00m00.0s), 0/1 VUs, 1 complete and 0 interrupted iterations
 default ✓ [======================================] 1 VUs  00m00.0s/10m0s  1/1 shared iters
 
-     celery_task_queue_time...: avg=1.31ms  min=832.31µs med=1.38ms   max=1.71ms  p(90)=1.64ms  p(95)=1.68ms 
-     celery_task_runtime......: avg=3.05ms  min=289.44µs med=408.17µs max=8.47ms  p(90)=6.85ms  p(95)=7.66ms 
-     celery_tasks.............: 3       218.866576/s
-     celery_tasks_child.......: 1       72.955525/s
+     █ teardown
+
+     celery_task_queue_time...: avg=2.48ms  min=1.15ms   med=3.02ms   max=3.27ms  p(90)=3.22ms  p(95)=3.24ms 
+     celery_task_runtime......: avg=5.09ms  min=574.35µs med=813.72µs max=13.89ms p(90)=11.27ms p(95)=12.58ms
+     celery_tasks.............: 2       74.081224/s
+     celery_tasks_child.......: 1       37.040612/s
      celery_tasks_succeeded...: 100.00% ✓ 3          ✗ 0
+     celery_tasks_total.......: 3       111.121836/s
      data_received............: 0 B     0 B/s
      data_sent................: 0 B     0 B/s
-     iteration_duration.......: avg=12.94ms min=12.94ms  med=12.94ms  max=12.94ms p(90)=12.94ms p(95)=12.94ms
-     iterations...............: 1       72.955525/s
+     iteration_duration.......: avg=12.44ms min=3.44ms   med=12.44ms  max=21.44ms p(90)=19.64ms p(95)=20.54ms
+     iterations...............: 1       37.040612/s
+
 ```
