@@ -3,14 +3,14 @@ module github.com/fornfrey/xk6-celery
 go 1.18
 
 require (
-	github.com/dop251/goja v0.0.0-20220516123900-4418d4575a41
+	github.com/dop251/goja v0.0.0-20220806120448-1444e6b94559
 	github.com/google/uuid v1.3.0
-	github.com/rabbitmq/amqp091-go v1.3.4
-	go.k6.io/k6 v0.38.3
+	github.com/rabbitmq/amqp091-go v1.4.0
+	go.k6.io/k6 v0.39.0
 )
 
 require (
-	github.com/dlclark/regexp2 v1.4.1-0.20201116162257-a2a8dda75c91 // indirect
+	github.com/dlclark/regexp2 v1.7.0 // indirect
 	github.com/fatih/color v1.13.0 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.4-0.20211119122758-180fcef48034+incompatible // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
