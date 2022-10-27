@@ -47,7 +47,6 @@ type taskEvent struct {
 }
 
 func newClient(brokerUrl string, queueName string) (*Client, error) {
-
 	client := &Client{
 		queueName:        queueName,
 		connectionClosed: make(chan struct{}),
@@ -124,7 +123,6 @@ func (client *Client) startEventsConsumer(brokerUrl string) error {
 }
 
 func (client *Client) receiveDelivery(msg *amqp091.Delivery) {
-
 	var eventsRaw []json.RawMessage
 
 	switch msg.RoutingKey {
@@ -192,22 +190,27 @@ func (client *Client) handleSent(event taskEvent, eventRaw json.RawMessage) {
 		ctx := parent.vu.Context()
 		state := parent.vu.State()
 		eventTime := floatToTime(event.Timestamp)
-		tags := metrics.IntoSampleTags(&map[string]string{
-			"task": data.Name,
+		ctm := state.Tags.GetCurrentValues()
+		tags := ctm.Tags.With("task", data.Name)
+
+		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
+			Time: eventTime,
+			TimeSeries: metrics.TimeSeries{
+				Metric: parent.metrics.TasksTotal,
+				Tags:   tags,
+			},
+			Metadata: ctm.Metadata,
+			Value:    1,
 		})
 
 		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
-			Time:   eventTime,
-			Metric: parent.metrics.TasksTotal,
-			Tags:   tags,
-			Value:  1,
-		})
-
-		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
-			Time:   eventTime,
-			Metric: parent.metrics.ChildTasks,
-			Tags:   tags,
-			Value:  1,
+			Time: eventTime,
+			TimeSeries: metrics.TimeSeries{
+				Metric: parent.metrics.ChildTasks,
+				Tags:   tags,
+			},
+			Metadata: ctm.Metadata,
+			Value:    1,
 		})
 	}
 }
@@ -219,16 +222,18 @@ func (client *Client) handleStarted(event taskEvent) {
 
 		ctx := task.vu.Context()
 		state := task.vu.State()
+		ctm := state.Tags.GetCurrentValues()
 
 		eventTime := floatToTime(event.Timestamp)
 		queueTimeNano := (event.Timestamp - task.sentAt) * 1000
 		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
-			Time:   eventTime,
-			Metric: task.metrics.TaskQueueTime,
-			Tags: metrics.IntoSampleTags(&map[string]string{
-				"task": task.taskName,
-			}),
-			Value: queueTimeNano,
+			Time: eventTime,
+			TimeSeries: metrics.TimeSeries{
+				Metric: task.metrics.TaskQueueTime,
+				Tags:   ctm.Tags.With("task", task.taskName),
+			},
+			Metadata: ctm.Metadata,
+			Value:    queueTimeNano,
 		})
 
 		task.startedAt = event.Timestamp
@@ -244,6 +249,7 @@ func (client *Client) handleFinished(event taskEvent, succeeded bool) {
 		ctx := task.vu.Context()
 		state := task.vu.State()
 		eventTime := floatToTime(event.Timestamp)
+		ctm := state.Tags.GetCurrentValues()
 
 		taskState := "failure"
 		taskSucceededVal := 0.
@@ -253,23 +259,24 @@ func (client *Client) handleFinished(event taskEvent, succeeded bool) {
 		}
 
 		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
-			Time:   eventTime,
-			Metric: task.metrics.TasksSucceeded,
-			Tags: metrics.IntoSampleTags(&map[string]string{
-				"task": task.taskName,
-			}),
-			Value: taskSucceededVal,
+			Time: eventTime,
+			TimeSeries: metrics.TimeSeries{
+				Metric: task.metrics.TasksSucceeded,
+				Tags:   ctm.Tags.With("task", task.taskName),
+			},
+			Metadata: ctm.Metadata,
+			Value:    taskSucceededVal,
 		})
 
 		runtimeNanoSec := (event.Timestamp - task.startedAt) * 1000
 		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
-			Time:   eventTime,
-			Metric: task.metrics.TaskRuntime,
-			Tags: metrics.IntoSampleTags(&map[string]string{
-				"task":  task.taskName,
-				"state": taskState,
-			}),
-			Value: runtimeNanoSec,
+			Time: eventTime,
+			TimeSeries: metrics.TimeSeries{
+				Metric: task.metrics.TaskRuntime,
+				Tags:   ctm.Tags.With("task", task.taskName).With("state", taskState),
+			},
+			Metadata: ctm.Metadata,
+			Value:    runtimeNanoSec,
 		})
 
 		task.waitGroup.Done()
@@ -283,26 +290,28 @@ func (client *Client) handleRetried(event taskEvent) {
 
 		ctx := task.vu.Context()
 		state := task.vu.State()
+		ctm := state.Tags.GetCurrentValues()
 		eventTime := floatToTime(event.Timestamp)
 
 		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
-			Time:   eventTime,
-			Metric: task.metrics.TasksRetried,
-			Tags: metrics.IntoSampleTags(&map[string]string{
-				"task": task.taskName,
-			}),
-			Value: 1,
+			Time: eventTime,
+			TimeSeries: metrics.TimeSeries{
+				Metric: task.metrics.TasksRetried,
+				Tags:   ctm.Tags.With("task", task.taskName),
+			},
+			Metadata: ctm.Metadata,
+			Value:    1,
 		})
 
 		runtimeNanoSec := (event.Timestamp - task.startedAt) * 1000
 		metrics.PushIfNotDone(ctx, state.Samples, metrics.Sample{
-			Time:   eventTime,
-			Metric: task.metrics.TaskRuntime,
-			Tags: metrics.IntoSampleTags(&map[string]string{
-				"task":  task.taskName,
-				"state": "retry",
-			}),
-			Value: runtimeNanoSec,
+			Time: eventTime,
+			TimeSeries: metrics.TimeSeries{
+				Metric: task.metrics.TaskRuntime,
+				Tags:   ctm.Tags.With("task", task.taskName).With("state", "retry"),
+			},
+			Metadata: ctm.Metadata,
+			Value:    runtimeNanoSec,
 		})
 
 		task.sentAt = event.Timestamp
@@ -310,7 +319,6 @@ func (client *Client) handleRetried(event taskEvent) {
 }
 
 func (client *Client) RunTask(sig *TaskSignature, vu modules.VU, vuMetrics *celeryMetrics) error {
-
 	taskId := uuid.New().String()
 
 	publishing, err := sig.Publishing(taskId)
@@ -346,23 +354,28 @@ func (client *Client) RunTask(sig *TaskSignature, vu modules.VU, vuMetrics *cele
 		client.runningTasks.Delete(taskId)
 		return err
 	}
+	ctm := vu.State().Tags.GetCurrentValues()
 
-	tags := metrics.IntoSampleTags(&map[string]string{
-		"task": sig.Name,
+	tags := ctm.Tags.With("task", sig.Name)
+
+	metrics.PushIfNotDone(vu.Context(), vu.State().Samples, metrics.Sample{
+		Time: now,
+		TimeSeries: metrics.TimeSeries{
+			Metric: vuMetrics.Tasks,
+			Tags:   tags,
+		},
+		Metadata: ctm.Metadata,
+		Value:    1,
 	})
 
 	metrics.PushIfNotDone(vu.Context(), vu.State().Samples, metrics.Sample{
-		Time:   now,
-		Metric: vuMetrics.Tasks,
-		Tags:   tags,
-		Value:  1,
-	})
-
-	metrics.PushIfNotDone(vu.Context(), vu.State().Samples, metrics.Sample{
-		Time:   now,
-		Metric: vuMetrics.TasksTotal,
-		Tags:   tags,
-		Value:  1,
+		Time: now,
+		TimeSeries: metrics.TimeSeries{
+			Metric: vuMetrics.TasksTotal,
+			Tags:   tags,
+		},
+		Metadata: ctm.Metadata,
+		Value:    1,
 	})
 
 	taskDone := make(chan struct{})
