@@ -6,7 +6,7 @@ require (
 	github.com/dop251/goja v0.0.0-20221003171542-5ea1285e6c91
 	github.com/google/uuid v1.3.0
 	github.com/rabbitmq/amqp091-go v1.4.0
-	go.k6.io/k6 v0.40.1-0.20221020144551-8a74171c8b43
+	go.k6.io/k6 v0.41.0
 )
 
 require (
